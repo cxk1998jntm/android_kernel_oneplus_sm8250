@@ -1,0 +1,80 @@
+name: Build KernelSU-Next Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: 16.0
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex git \
+            libelf-dev libssl-dev libncurses-dev \
+            python3 unzip wget zip zstd
+
+      - name: Clone Android clang
+        run: |
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            clang
+
+      - name: Integrate KernelSU-Next
+        run: |
+          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh | bash
+
+      - name: Prepare config
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$GITHUB_WORKSPACE/clang/clang-r530567/bin:$PATH"
+
+          make O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/kona-perf_defconfig
+
+          cat arch/arm64/configs/vendor/oplus.config >> out/.config
+
+          echo "CONFIG_KSU=y" >> out/.config
+
+          make O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+      - name: Build kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$GITHUB_WORKSPACE/clang/clang-r530567/bin:$PATH"
+
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1
+
+      - name: Show outputs
+        run: |
+          ls -lh out/arch/arm64/boot/ || true
+          file out/arch/arm64/boot/Image || true
+
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus8T-KernelSU-Next-kernel
+          path: |
+            out/arch/arm64/boot/Image
+            out/.config
