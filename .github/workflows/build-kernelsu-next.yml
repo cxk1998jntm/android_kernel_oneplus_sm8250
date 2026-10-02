@@ -41,7 +41,7 @@ jobs:
             https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
             | bash -s legacy
 
-      - name: Apply manual hooks
+      - name: Apply manual hooks safely
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -52,69 +52,139 @@ jobs:
           def write(path, data):
               Path(path).write_text(data)
 
-          # =================================================
-          # fs/open.c
-          # =================================================
+          def function_range(data, marker):
+              """
+              Find one C function beginning at marker and return:
+              marker_pos, opening_brace_pos, closing_brace_pos
+              """
+              start = data.find(marker)
+              if start == -1:
+                  raise SystemExit(f"[FAIL] function marker not found: {marker}")
+
+              brace = data.find("{", start)
+              if brace == -1:
+                  raise SystemExit(f"[FAIL] opening brace not found: {marker}")
+
+              depth = 0
+
+              for i in range(brace, len(data)):
+                  ch = data[i]
+
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+
+                      if depth == 0:
+                          return start, brace, i
+
+              raise SystemExit(f"[FAIL] closing brace not found: {marker}")
+
+          def insert_before_function(path, marker, declaration):
+              data = read(path)
+
+              if declaration.split("(")[0].strip() in data:
+                  return data
+
+              pos = data.find(marker)
+
+              if pos == -1:
+                  raise SystemExit(
+                      f"[FAIL] marker not found for declaration in {path}"
+                  )
+
+              data = data[:pos] + declaration + "\n\n" + data[pos:]
+
+              return data
+
+          # ============================================================
+          # fs/open.c : do_faccessat
+          # ============================================================
           path = "fs/open.c"
           data = read(path)
 
-          marker = "long do_faccessat(int dfd, const char __user *filename, int mode)"
+          marker = (
+              "long do_faccessat(int dfd, "
+              "const char __user *filename, int mode)"
+          )
 
           if marker not in data:
               raise SystemExit("[FAIL] do_faccessat signature not found")
 
-          if "ksu_handle_faccessat" not in data:
-              data = data.replace(
-                  marker,
-                  """#ifdef CONFIG_KSU
-          extern int ksu_handle_faccessat(int *dfd,
-                         const char __user **filename_user,
-                         int *mode, int *flags);
+          if "extern int ksu_handle_faccessat" not in data:
+              pos = data.find(marker)
+
+              declaration = """#ifdef CONFIG_KSU
+          extern int ksu_handle_faccessat(
+                  int *dfd,
+                  const char __user **filename_user,
+                  int *mode,
+                  int *flags);
           #endif
 
-          """ + marker,
-                  1
-              )
+          """
 
-              target = "\tunsigned int lookup_flags = LOOKUP_FOLLOW;"
+              data = data[:pos] + declaration + data[pos:]
 
-              if target not in data:
-                  target = "    unsigned int lookup_flags = LOOKUP_FOLLOW;"
+          start, brace, end = function_range(data, marker)
 
-              if target not in data:
+          func = data[start:end + 1]
+
+          if "ksu_handle_faccessat(&dfd" not in func:
+
+              targets = [
+                  "\tunsigned int lookup_flags = LOOKUP_FOLLOW;",
+                  "    unsigned int lookup_flags = LOOKUP_FOLLOW;",
+              ]
+
+              target = None
+
+              for candidate in targets:
+                  if candidate in func:
+                      target = candidate
+                      break
+
+              if target is None:
+                  print("\n===== do_faccessat =====")
+                  print(func[:1500])
                   raise SystemExit(
-                      "[FAIL] lookup_flags declaration not found in do_faccessat"
+                      "[FAIL] do_faccessat lookup_flags not found"
                   )
 
-              patched = target + """
+              hook = target + """
           #ifdef CONFIG_KSU
-              ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+              ksu_handle_faccessat(
+                  &dfd, &filename, &mode, NULL);
           #endif"""
 
-              data = data.replace(target, patched, 1)
+              func = func.replace(target, hook, 1)
 
-              write(path, data)
-              print("[OK] patched fs/open.c")
-          else:
-              print("[SKIP] fs/open.c already contains hook")
+              data = data[:start] + func + data[end + 1:]
 
-          # =================================================
-          # fs/exec.c
-          # =================================================
+          write(path, data)
+
+          print("[OK] patched fs/open.c / do_faccessat")
+
+          # ============================================================
+          # fs/exec.c : do_execveat_common
+          # ============================================================
           path = "fs/exec.c"
           data = read(path)
 
-          marker = "static int do_execveat_common(int fd, struct filename *filename,"
+          marker = (
+              "static int do_execveat_common("
+              "int fd, struct filename *filename,"
+          )
 
           if marker not in data:
               raise SystemExit(
                   "[FAIL] do_execveat_common signature not found"
               )
 
-          if "ksu_handle_execveat(" not in data:
-              data = data.replace(
-                  marker,
-                  """#ifdef CONFIG_KSU
+          if "extern int ksu_handle_execveat(" not in data:
+              pos = data.find(marker)
+
+              declaration = """#ifdef CONFIG_KSU
           extern bool ksu_execveat_hook __read_mostly;
 
           extern int ksu_handle_execveat(
@@ -132,19 +202,17 @@ jobs:
                   int *flags);
           #endif
 
-          """ + marker,
-                  1
-              )
+          """
 
-              pos = data.find(marker)
-              brace = data.find("{", pos)
+              data = data[:pos] + declaration + data[pos:]
 
-              if brace == -1:
-                  raise SystemExit(
-                      "[FAIL] do_execveat_common opening brace not found"
-                  )
+          start, brace, end = function_range(data, marker)
 
-              insert = """
+          func = data[start:end + 1]
+
+          if "ksu_handle_execveat(" not in func:
+
+              hook = """
           #ifdef CONFIG_KSU
               if (unlikely(ksu_execveat_hook))
                   ksu_handle_execveat(
@@ -155,16 +223,23 @@ jobs:
           #endif
           """
 
-              data = data[:brace + 1] + insert + data[brace + 1:]
+              local_brace = func.find("{")
 
-              write(path, data)
-              print("[OK] patched fs/exec.c")
-          else:
-              print("[SKIP] fs/exec.c already contains hook")
+              func = (
+                  func[:local_brace + 1]
+                  + hook
+                  + func[local_brace + 1:]
+              )
 
-          # =================================================
-          # fs/read_write.c
-          # =================================================
+              data = data[:start] + func + data[end + 1:]
+
+          write(path, data)
+
+          print("[OK] patched fs/exec.c / do_execveat_common")
+
+          # ============================================================
+          # fs/read_write.c : SYSCALL_DEFINE3(read)
+          # ============================================================
           path = "fs/read_write.c"
           data = read(path)
 
@@ -178,10 +253,10 @@ jobs:
                   "[FAIL] SYSCALL_DEFINE3(read) not found"
               )
 
-          if "ksu_handle_sys_read" not in data:
-              data = data.replace(
-                  marker,
-                  """#ifdef CONFIG_KSU
+          if "extern __attribute__((cold)) int ksu_handle_sys_read" not in data:
+              pos = data.find(marker)
+
+              declaration = """#ifdef CONFIG_KSU
           extern bool ksu_vfs_read_hook __read_mostly;
 
           extern __attribute__((cold)) int ksu_handle_sys_read(
@@ -190,33 +265,61 @@ jobs:
                   size_t *count_ptr);
           #endif
 
-          """ + marker,
-                  1
-              )
+          """
 
-              body = marker + "\n{"
+              data = data[:pos] + declaration + data[pos:]
 
-              if body not in data:
+          start, brace, end = function_range(data, marker)
+
+          func = data[start:end + 1]
+
+          if "ksu_handle_sys_read(fd" not in func:
+
+              # Linux 4.19 read syscall normally declares:
+              #
+              # struct fd f = fdget_pos(fd);
+              # ssize_t ret = -EBADF;
+              #
+              # Insert immediately before first executable if-statement.
+              targets = [
+                  "\tif (f.file) {",
+                  "    if (f.file) {",
+                  "\tif (f.file)",
+                  "    if (f.file)",
+              ]
+
+              target = None
+
+              for candidate in targets:
+                  if candidate in func:
+                      target = candidate
+                      break
+
+              if target is None:
+                  print("\n===== SYSCALL_DEFINE3(read) =====")
+                  print(func[:1500])
                   raise SystemExit(
-                      "[FAIL] read syscall body not found"
+                      "[FAIL] first read() executable statement not found"
                   )
 
-              patched = body + """
-          #ifdef CONFIG_KSU
+              hook = """#ifdef CONFIG_KSU
               if (unlikely(ksu_vfs_read_hook))
                   ksu_handle_sys_read(fd, &buf, &count);
-          #endif"""
+          #endif
 
-              data = data.replace(body, patched, 1)
+          """ + target
 
-              write(path, data)
-              print("[OK] patched fs/read_write.c")
-          else:
-              print("[SKIP] fs/read_write.c already contains hook")
+              func = func.replace(target, hook, 1)
 
-          # =================================================
-          # fs/stat.c
-          # =================================================
+              data = data[:start] + func + data[end + 1:]
+
+          write(path, data)
+
+          print("[OK] patched fs/read_write.c / read")
+
+          # ============================================================
+          # fs/stat.c : vfs_statx
+          # ============================================================
           path = "fs/stat.c"
           data = read(path)
 
@@ -230,19 +333,25 @@ jobs:
                   "[FAIL] vfs_statx signature not found"
               )
 
-          if "ksu_handle_stat" not in data:
-              data = data.replace(
-                  marker,
-                  """#ifdef CONFIG_KSU
+          if "extern int ksu_handle_stat(" not in data:
+              pos = data.find(marker)
+
+              declaration = """#ifdef CONFIG_KSU
           extern int ksu_handle_stat(
                   int *dfd,
                   const char __user **filename_user,
                   int *flags);
           #endif
 
-          """ + marker,
-                  1
-              )
+          """
+
+              data = data[:pos] + declaration + data[pos:]
+
+          start, brace, end = function_range(data, marker)
+
+          func = data[start:end + 1]
+
+          if "ksu_handle_stat(&dfd" not in func:
 
               targets = [
                   "\tunsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
@@ -252,30 +361,33 @@ jobs:
               target = None
 
               for candidate in targets:
-                  if candidate in data:
+                  if candidate in func:
                       target = candidate
                       break
 
               if target is None:
+                  print("\n===== vfs_statx =====")
+                  print(func[:1800])
                   raise SystemExit(
-                      "[FAIL] vfs_statx lookup_flags line not found"
+                      "[FAIL] vfs_statx lookup_flags not found"
                   )
 
-              patched = target + """
+              hook = target + """
           #ifdef CONFIG_KSU
               ksu_handle_stat(&dfd, &filename, &flags);
           #endif"""
 
-              data = data.replace(target, patched, 1)
+              func = func.replace(target, hook, 1)
 
-              write(path, data)
-              print("[OK] patched fs/stat.c")
-          else:
-              print("[SKIP] fs/stat.c already contains hook")
+              data = data[:start] + func + data[end + 1:]
 
-          # =================================================
-          # kernel/reboot.c
-          # =================================================
+          write(path, data)
+
+          print("[OK] patched fs/stat.c / vfs_statx")
+
+          # ============================================================
+          # kernel/reboot.c : reboot
+          # ============================================================
           path = "kernel/reboot.c"
           data = read(path)
 
@@ -289,10 +401,10 @@ jobs:
                   "[FAIL] reboot syscall signature not found"
               )
 
-          if "ksu_handle_sys_reboot" not in data:
-              data = data.replace(
-                  marker,
-                  """#ifdef CONFIG_KSU
+          if "extern int ksu_handle_sys_reboot(" not in data:
+              pos = data.find(marker)
+
+              declaration = """#ifdef CONFIG_KSU
           extern int ksu_handle_sys_reboot(
                   int magic1,
                   int magic2,
@@ -300,59 +412,121 @@ jobs:
                   void __user **arg);
           #endif
 
-          """ + marker,
-                  1
-              )
+          """
 
-              target = (
-                  "if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))"
-              )
+              data = data[:pos] + declaration + data[pos:]
 
-              if target not in data:
+          start, brace, end = function_range(data, marker)
+
+          func = data[start:end + 1]
+
+          if "ksu_handle_sys_reboot(" not in func:
+
+              targets = [
+                  "\tif (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
+                  "    if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
+                  "if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
+              ]
+
+              target = None
+
+              for candidate in targets:
+                  if candidate in func:
+                      target = candidate
+                      break
+
+              if target is None:
+                  print("\n===== reboot syscall =====")
+                  print(func[:1800])
                   raise SystemExit(
                       "[FAIL] reboot capability check not found"
                   )
 
-              patched = """#ifdef CONFIG_KSU
+              hook = """#ifdef CONFIG_KSU
               if (system_state == SYSTEM_RUNNING)
                   ksu_handle_sys_reboot(
                       magic1, magic2, cmd, &arg);
           #endif
 
-              """ + target
+          """ + target
 
-              data = data.replace(target, patched, 1)
+              func = func.replace(target, hook, 1)
 
-              write(path, data)
-              print("[OK] patched kernel/reboot.c")
-          else:
-              print("[SKIP] kernel/reboot.c already contains hook")
+              data = data[:start] + func + data[end + 1:]
 
-          # =================================================
+          write(path, data)
+
+          print("[OK] patched kernel/reboot.c / reboot")
+
+          # ============================================================
           # Verification
-          # =================================================
+          # ============================================================
           print("\n========== Manual Hook Verification ==========")
 
-          checks = {
-              "fs/open.c": "ksu_handle_faccessat",
-              "fs/exec.c": "ksu_handle_execveat",
-              "fs/read_write.c": "ksu_handle_sys_read",
-              "fs/stat.c": "ksu_handle_stat",
-              "kernel/reboot.c": "ksu_handle_sys_reboot",
-          }
+          checks = [
+              ("fs/open.c",
+               marker if False else
+               "long do_faccessat(int dfd, const char __user *filename, int mode)",
+               "ksu_handle_faccessat(&dfd"),
 
-          for file, symbol in checks.items():
+              ("fs/exec.c",
+               "static int do_execveat_common(int fd, struct filename *filename,",
+               "ksu_handle_execveat("),
+
+              ("fs/read_write.c",
+               "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)",
+               "ksu_handle_sys_read(fd"),
+
+              ("fs/stat.c",
+               "int vfs_statx(int dfd, const char __user *filename, int flags,",
+               "ksu_handle_stat(&dfd"),
+
+              ("kernel/reboot.c",
+               "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,",
+               "ksu_handle_sys_reboot("),
+          ]
+
+          for file, func_marker, hook_symbol in checks:
+
               txt = read(file)
 
-              if symbol not in txt:
+              start, brace, end = function_range(txt, func_marker)
+
+              func = txt[start:end + 1]
+
+              if hook_symbol not in func:
                   raise SystemExit(
-                      f"[FAIL] {symbol} missing from {file}"
+                      f"[FAIL] {hook_symbol} not inside target function in {file}"
                   )
 
-              print(f"[OK] {file}: {symbol}")
+              print(
+                  f"[OK] {file}: hook is inside target function"
+              )
 
-          print("\n[OK] all manual hooks installed")
+          print("\n[OK] all manual hooks installed in correct functions")
           PY
+
+      - name: Show patched function excerpts
+        run: |
+          echo "========== do_faccessat =========="
+          grep -n -A30 -B5 \
+            "long do_faccessat" fs/open.c | head -60 || true
+
+          echo "========== do_execveat_common =========="
+          grep -n -A35 -B5 \
+            "static int do_execveat_common" fs/exec.c | head -70 || true
+
+          echo "========== read syscall =========="
+          grep -n -A30 -B5 \
+            "SYSCALL_DEFINE3(read" fs/read_write.c | head -60 || true
+
+          echo "========== vfs_statx =========="
+          grep -n -A30 -B5 \
+            "int vfs_statx" fs/stat.c | head -60 || true
+
+          echo "========== reboot =========="
+          grep -n -A40 -B5 \
+            "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -80 || true
 
       - name: Prepare toolchain
         run: |
