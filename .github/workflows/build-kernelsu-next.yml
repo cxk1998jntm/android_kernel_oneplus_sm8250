@@ -52,24 +52,14 @@ jobs:
           def write(path, data):
               Path(path).write_text(data)
 
-          def replace_once(path, old, new):
-              data = read(path)
-              if new in data:
-                  print(f"[SKIP] already patched: {path}")
-                  return
-              if old not in data:
-                  raise SystemExit(f"[FAIL] pattern not found in {path}:\n{old}")
-              data = data.replace(old, new, 1)
-              write(path, data)
-              print(f"[OK] patched {path}")
-
-          # -------------------------------------------------
+          # =================================================
           # fs/open.c : do_faccessat
-          # -------------------------------------------------
+          # =================================================
           path = "fs/open.c"
           data = read(path)
 
           marker = "long do_faccessat(int dfd, const char __user *filename, int mode)"
+
           if marker not in data:
               raise SystemExit("[FAIL] do_faccessat signature not found")
 
@@ -78,36 +68,48 @@ jobs:
                   marker,
                   """#ifdef CONFIG_KSU
           extern int ksu_handle_faccessat(int *dfd,
-                          const char __user **filename_user,
-                          int *mode, int *flags);
+                         const char __user **filename_user,
+                         int *mode, int *flags);
           #endif
 
           """ + marker,
                   1
               )
 
-              body = """long do_faccessat(int dfd, const char __user *filename, int mode)
-          {"""
-              patched = """long do_faccessat(int dfd, const char __user *filename, int mode)
-          {
+              # IMPORTANT:
+              # Kernel 4.19 is built with declaration-after-statement as Werror.
+              # Hook must be inserted AFTER local variable declarations.
+
+              target = "\tunsigned int lookup_flags = LOOKUP_FOLLOW;"
+
+              if target not in data:
+                  target = "    unsigned int lookup_flags = LOOKUP_FOLLOW;"
+
+              if target not in data:
+                  raise SystemExit(
+                      "[FAIL] lookup_flags declaration not found in do_faccessat"
+                  )
+
+              patched = target + """
           #ifdef CONFIG_KSU
               ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
           #endif"""
-              if body not in data:
-                  raise SystemExit("[FAIL] do_faccessat body not found")
-              data = data.replace(body, patched, 1)
+
+              data = data.replace(target, patched, 1)
+
               write(path, data)
               print("[OK] patched fs/open.c")
           else:
               print("[SKIP] fs/open.c already contains KSU hook")
 
-          # -------------------------------------------------
+          # =================================================
           # fs/exec.c : do_execveat_common
-          # -------------------------------------------------
+          # =================================================
           path = "fs/exec.c"
           data = read(path)
 
           marker = "static int do_execveat_common(int fd, struct filename *filename,"
+
           if marker not in data:
               raise SystemExit("[FAIL] do_execveat_common signature not found")
 
@@ -128,11 +130,38 @@ jobs:
                   1
               )
 
-              # Insert after opening brace of do_execveat_common
               pos = data.find(marker)
               brace = data.find("{", pos)
+
               if brace == -1:
-                  raise SystemExit("[FAIL] do_execveat_common opening brace not found")
+                  raise SystemExit(
+                      "[FAIL] do_execveat_common opening brace not found"
+                  )
+
+              # Find first non-declaration execution line.
+              # Use bprm declaration block as anchor when available.
+
+              search_area = data[brace:brace + 2500]
+
+              candidates = [
+                  "\tstruct linux_binprm *bprm;",
+                  "\tstruct files_struct *displaced;",
+                  "\tint retval;",
+              ]
+
+              insert_after = None
+
+              for c in candidates:
+                  p = search_area.rfind(c)
+                  if p != -1:
+                      end = brace + p + len(c)
+                      if insert_after is None or end > insert_after:
+                          insert_after = end
+
+              if insert_after is None:
+                  raise SystemExit(
+                      "[FAIL] unable to locate declaration block in do_execveat_common"
+                  )
 
               insert = """
           #ifdef CONFIG_KSU
@@ -140,21 +169,26 @@ jobs:
                   ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
               else
                   ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
-          #endif
-          """
-              data = data[:brace+1] + insert + data[brace+1:]
+          #endif"""
+
+              data = data[:insert_after] + insert + data[insert_after:]
+
               write(path, data)
               print("[OK] patched fs/exec.c")
           else:
               print("[SKIP] fs/exec.c already contains KSU hook")
 
-          # -------------------------------------------------
-          # fs/read_write.c : 4.19 read syscall hook
-          # -------------------------------------------------
+          # =================================================
+          # fs/read_write.c : Android 4.19 read syscall
+          # =================================================
           path = "fs/read_write.c"
           data = read(path)
 
-          marker = "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)"
+          marker = (
+              "SYSCALL_DEFINE3(read, unsigned int, fd, "
+              "char __user *, buf, size_t, count)"
+          )
+
           if marker not in data:
               raise SystemExit("[FAIL] SYSCALL_DEFINE3(read) not found")
 
@@ -173,31 +207,40 @@ jobs:
                   1
               )
 
-              body = """SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
-          {"""
-              patched = """SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
-          {
+              body = marker + "\n{"
+
+              if body not in data:
+                  raise SystemExit("[FAIL] read syscall body not found")
+
+              # In this function there should be no new declarations
+              # after this hook in the legacy integration path.
+              patched = body + """
           #ifdef CONFIG_KSU
               if (unlikely(ksu_vfs_read_hook))
                   ksu_handle_sys_read(fd, &buf, &count);
           #endif"""
-              if body not in data:
-                  raise SystemExit("[FAIL] read syscall body not found")
+
               data = data.replace(body, patched, 1)
+
               write(path, data)
               print("[OK] patched fs/read_write.c")
           else:
               print("[SKIP] fs/read_write.c already contains KSU hook")
 
-          # -------------------------------------------------
-          # fs/stat.c : vfs_statx or vfs_fstatat
-          # -------------------------------------------------
+          # =================================================
+          # fs/stat.c : vfs_statx / vfs_fstatat
+          # =================================================
           path = "fs/stat.c"
           data = read(path)
 
           if "ksu_handle_stat" not in data:
+
               if "int vfs_statx(int dfd, const char __user *filename, int flags," in data:
-                  marker = "int vfs_statx(int dfd, const char __user *filename, int flags,"
+                  marker = (
+                      "int vfs_statx(int dfd, "
+                      "const char __user *filename, int flags,"
+                  )
+
                   data = data.replace(
                       marker,
                       """#ifdef CONFIG_KSU
@@ -209,20 +252,58 @@ jobs:
           """ + marker,
                       1
                   )
+
                   pos = data.find(marker)
                   brace = data.find("{", pos)
+
                   if brace == -1:
                       raise SystemExit("[FAIL] vfs_statx brace not found")
+
+                  # Locate local variable declaration block.
+                  block = data[brace:brace + 1500]
+
+                  candidates = [
+                      "\tstruct path path;",
+                      "\tunsigned int lookup_flags",
+                      "\tint error;",
+                  ]
+
+                  insert_after = None
+
+                  for c in candidates:
+                      p = block.rfind(c)
+                      if p != -1:
+                          line_end = block.find("\n", p)
+                          if line_end != -1:
+                              end = brace + line_end
+                              if insert_after is None or end > insert_after:
+                                  insert_after = end
+
+                  if insert_after is None:
+                      raise SystemExit(
+                          "[FAIL] declaration block not found in vfs_statx"
+                      )
+
                   insert = """
           #ifdef CONFIG_KSU
               ksu_handle_stat(&dfd, &filename, &flags);
-          #endif
-          """
-                  data = data[:brace+1] + insert + data[brace+1:]
+          #endif"""
+
+                  data = (
+                      data[:insert_after]
+                      + insert
+                      + data[insert_after:]
+                  )
+
                   print("[OK] patched vfs_statx")
 
               elif "int vfs_fstatat(int dfd, const char __user *filename," in data:
-                  marker = "int vfs_fstatat(int dfd, const char __user *filename,"
+
+                  marker = (
+                      "int vfs_fstatat(int dfd, "
+                      "const char __user *filename,"
+                  )
+
                   data = data.replace(
                       marker,
                       """#ifdef CONFIG_KSU
@@ -234,86 +315,162 @@ jobs:
           """ + marker,
                       1
                   )
+
                   pos = data.find(marker)
                   brace = data.find("{", pos)
+
                   if brace == -1:
-                      raise SystemExit("[FAIL] vfs_fstatat brace not found")
+                      raise SystemExit(
+                          "[FAIL] vfs_fstatat brace not found"
+                      )
+
+                  block = data[brace:brace + 1500]
+
+                  candidates = [
+                      "\tstruct kstat stat;",
+                      "\tint error;",
+                  ]
+
+                  insert_after = None
+
+                  for c in candidates:
+                      p = block.rfind(c)
+                      if p != -1:
+                          line_end = block.find("\n", p)
+                          if line_end != -1:
+                              end = brace + line_end
+                              if insert_after is None or end > insert_after:
+                                  insert_after = end
+
+                  if insert_after is None:
+                      raise SystemExit(
+                          "[FAIL] declaration block not found in vfs_fstatat"
+                      )
+
                   insert = """
           #ifdef CONFIG_KSU
               ksu_handle_stat(&dfd, &filename, &flag);
-          #endif
-          """
-                  data = data[:brace+1] + insert + data[brace+1:]
+          #endif"""
+
+                  data = (
+                      data[:insert_after]
+                      + insert
+                      + data[insert_after:]
+                  )
+
                   print("[OK] patched vfs_fstatat")
+
               else:
-                  raise SystemExit("[FAIL] neither vfs_statx nor vfs_fstatat found")
+                  raise SystemExit(
+                      "[FAIL] neither vfs_statx nor vfs_fstatat found"
+                  )
 
               write(path, data)
+
           else:
               print("[SKIP] fs/stat.c already contains KSU hook")
 
-          # -------------------------------------------------
-          # kernel/reboot.c : required by KSUN legacy Kbuild
-          # -------------------------------------------------
+          # =================================================
+          # kernel/reboot.c
+          # =================================================
           path = "kernel/reboot.c"
           data = read(path)
 
-          marker = "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,"
+          marker = (
+              "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, "
+              "unsigned int, cmd,"
+          )
+
           if marker not in data:
-              raise SystemExit("[FAIL] reboot syscall signature not found")
+              raise SystemExit(
+                  "[FAIL] reboot syscall signature not found"
+              )
 
           if "ksu_handle_sys_reboot" not in data:
+
               data = data.replace(
                   marker,
                   """#ifdef CONFIG_KSU
-          extern int ksu_handle_sys_reboot(int magic1, int magic2,
-                           unsigned int cmd,
-                           void __user **arg);
+          extern int ksu_handle_sys_reboot(
+                  int magic1,
+                  int magic2,
+                  unsigned int cmd,
+                  void __user **arg);
           #endif
 
           """ + marker,
                   1
               )
 
-              target = "if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))"
-              if target not in data:
-                  raise SystemExit("[FAIL] reboot capability check not found")
+              target = (
+                  "if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))"
+              )
 
-              data = data.replace(
-                  target,
-                  """#ifdef CONFIG_KSU
+              if target not in data:
+                  raise SystemExit(
+                      "[FAIL] reboot capability check not found"
+                  )
+
+              patched = """#ifdef CONFIG_KSU
               if (system_state == SYSTEM_RUNNING)
-                  ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+                  ksu_handle_sys_reboot(
+                      magic1, magic2, cmd, &arg);
           #endif
 
-              """ + target,
-                  1
-              )
+              """ + target
+
+              data = data.replace(target, patched, 1)
 
               write(path, data)
               print("[OK] patched kernel/reboot.c")
-          else:
-              print("[SKIP] kernel/reboot.c already contains KSU hook")
 
-          print("\\n=== Manual hook verification ===")
-          for f in [
+          else:
+              print(
+                  "[SKIP] kernel/reboot.c already contains KSU hook"
+              )
+
+          # =================================================
+          # Verification
+          # =================================================
+          print("\n========== Manual hook verification ==========")
+
+          files = [
               "fs/open.c",
               "fs/exec.c",
               "fs/read_write.c",
               "fs/stat.c",
               "kernel/reboot.c",
-          ]:
+          ]
+
+          for f in files:
               txt = read(f)
-              hits = [line.strip() for line in txt.splitlines()
-                      if "ksu_handle_" in line]
-              print(f"\\n[{f}]")
+
+              print(f"\n[{f}]")
+
+              hits = [
+                  line.strip()
+                  for line in txt.splitlines()
+                  if "ksu_handle_" in line
+              ]
+
               for h in hits:
                   print(h)
 
-          if "ksu_handle_sys_reboot" not in read("kernel/reboot.c"):
-              raise SystemExit("[FAIL] reboot hook verification failed")
+          checks = {
+              "fs/open.c": "ksu_handle_faccessat",
+              "fs/exec.c": "ksu_handle_execveat",
+              "fs/read_write.c": "ksu_handle_sys_read",
+              "fs/stat.c": "ksu_handle_stat",
+              "kernel/reboot.c": "ksu_handle_sys_reboot",
+          }
 
-          print("\\n[OK] manual hooks installed")
+          for f, symbol in checks.items():
+              if symbol not in read(f):
+                  raise SystemExit(
+                      f"[FAIL] {symbol} missing from {f}"
+                  )
+
+          print("\n[OK] all required manual hooks installed")
           PY
 
       - name: Prepare toolchain
@@ -359,7 +516,7 @@ jobs:
             LLVM_IAS=1 \
             olddefconfig
 
-          echo "=== KernelSU config ==="
+          echo "========== KernelSU config =========="
           grep CONFIG_KSU out/.config || true
 
       - name: Build kernel
@@ -382,13 +539,13 @@ jobs:
 
       - name: Show outputs
         run: |
-          echo "=== Boot output directory ==="
+          echo "========== Boot output directory =========="
           ls -lh out/arch/arm64/boot/ || true
 
-          echo "=== Kernel Image ==="
+          echo "========== Kernel Image =========="
           file out/arch/arm64/boot/Image || true
 
-          echo "=== KernelSU config ==="
+          echo "========== KernelSU config =========="
           grep CONFIG_KSU out/.config || true
 
       - name: Upload kernel image
