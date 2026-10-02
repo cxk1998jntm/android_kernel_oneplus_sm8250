@@ -53,10 +53,6 @@ jobs:
               Path(path).write_text(data)
 
           def function_range(data, marker):
-              """
-              Find one C function beginning at marker and return:
-              marker_pos, opening_brace_pos, closing_brace_pos
-              """
               start = data.find(marker)
               if start == -1:
                   raise SystemExit(f"[FAIL] function marker not found: {marker}")
@@ -79,23 +75,6 @@ jobs:
                           return start, brace, i
 
               raise SystemExit(f"[FAIL] closing brace not found: {marker}")
-
-          def insert_before_function(path, marker, declaration):
-              data = read(path)
-
-              if declaration.split("(")[0].strip() in data:
-                  return data
-
-              pos = data.find(marker)
-
-              if pos == -1:
-                  raise SystemExit(
-                      f"[FAIL] marker not found for declaration in {path}"
-                  )
-
-              data = data[:pos] + declaration + "\n\n" + data[pos:]
-
-              return data
 
           # ============================================================
           # fs/open.c : do_faccessat
@@ -127,26 +106,21 @@ jobs:
               data = data[:pos] + declaration + data[pos:]
 
           start, brace, end = function_range(data, marker)
-
           func = data[start:end + 1]
 
           if "ksu_handle_faccessat(&dfd" not in func:
-
               targets = [
                   "\tunsigned int lookup_flags = LOOKUP_FOLLOW;",
                   "    unsigned int lookup_flags = LOOKUP_FOLLOW;",
               ]
 
-              target = None
-
-              for candidate in targets:
-                  if candidate in func:
-                      target = candidate
-                      break
+              target = next(
+                  (x for x in targets if x in func),
+                  None
+              )
 
               if target is None:
-                  print("\n===== do_faccessat =====")
-                  print(func[:1500])
+                  print(func[:1600])
                   raise SystemExit(
                       "[FAIL] do_faccessat lookup_flags not found"
                   )
@@ -158,11 +132,9 @@ jobs:
           #endif"""
 
               func = func.replace(target, hook, 1)
-
               data = data[:start] + func + data[end + 1:]
 
           write(path, data)
-
           print("[OK] patched fs/open.c / do_faccessat")
 
           # ============================================================
@@ -207,11 +179,9 @@ jobs:
               data = data[:pos] + declaration + data[pos:]
 
           start, brace, end = function_range(data, marker)
-
           func = data[start:end + 1]
 
           if "ksu_handle_execveat(" not in func:
-
               hook = """
           #ifdef CONFIG_KSU
               if (unlikely(ksu_execveat_hook))
@@ -234,7 +204,6 @@ jobs:
               data = data[:start] + func + data[end + 1:]
 
           write(path, data)
-
           print("[OK] patched fs/exec.c / do_execveat_common")
 
           # ============================================================
@@ -270,36 +239,25 @@ jobs:
               data = data[:pos] + declaration + data[pos:]
 
           start, brace, end = function_range(data, marker)
-
           func = data[start:end + 1]
 
           if "ksu_handle_sys_read(fd" not in func:
 
-              # Linux 4.19 read syscall normally declares:
-              #
-              # struct fd f = fdget_pos(fd);
-              # ssize_t ret = -EBADF;
-              #
-              # Insert immediately before first executable if-statement.
               targets = [
-                  "\tif (f.file) {",
-                  "    if (f.file) {",
-                  "\tif (f.file)",
-                  "    if (f.file)",
+                  "\treturn ksys_read(fd, buf, count);",
+                  "    return ksys_read(fd, buf, count);",
               ]
 
-              target = None
-
-              for candidate in targets:
-                  if candidate in func:
-                      target = candidate
-                      break
+              target = next(
+                  (x for x in targets if x in func),
+                  None
+              )
 
               if target is None:
                   print("\n===== SYSCALL_DEFINE3(read) =====")
-                  print(func[:1500])
+                  print(func[:1200])
                   raise SystemExit(
-                      "[FAIL] first read() executable statement not found"
+                      "[FAIL] return ksys_read line not found"
                   )
 
               hook = """#ifdef CONFIG_KSU
@@ -310,11 +268,9 @@ jobs:
           """ + target
 
               func = func.replace(target, hook, 1)
-
               data = data[:start] + func + data[end + 1:]
 
           write(path, data)
-
           print("[OK] patched fs/read_write.c / read")
 
           # ============================================================
@@ -348,22 +304,18 @@ jobs:
               data = data[:pos] + declaration + data[pos:]
 
           start, brace, end = function_range(data, marker)
-
           func = data[start:end + 1]
 
           if "ksu_handle_stat(&dfd" not in func:
-
               targets = [
                   "\tunsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
                   "    unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
               ]
 
-              target = None
-
-              for candidate in targets:
-                  if candidate in func:
-                      target = candidate
-                      break
+              target = next(
+                  (x for x in targets if x in func),
+                  None
+              )
 
               if target is None:
                   print("\n===== vfs_statx =====")
@@ -378,15 +330,13 @@ jobs:
           #endif"""
 
               func = func.replace(target, hook, 1)
-
               data = data[:start] + func + data[end + 1:]
 
           write(path, data)
-
           print("[OK] patched fs/stat.c / vfs_statx")
 
           # ============================================================
-          # kernel/reboot.c : reboot
+          # kernel/reboot.c
           # ============================================================
           path = "kernel/reboot.c"
           data = read(path)
@@ -417,23 +367,19 @@ jobs:
               data = data[:pos] + declaration + data[pos:]
 
           start, brace, end = function_range(data, marker)
-
           func = data[start:end + 1]
 
           if "ksu_handle_sys_reboot(" not in func:
-
               targets = [
                   "\tif (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
                   "    if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
                   "if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
               ]
 
-              target = None
-
-              for candidate in targets:
-                  if candidate in func:
-                      target = candidate
-                      break
+              target = next(
+                  (x for x in targets if x in func),
+                  None
+              )
 
               if target is None:
                   print("\n===== reboot syscall =====")
@@ -451,11 +397,9 @@ jobs:
           """ + target
 
               func = func.replace(target, hook, 1)
-
               data = data[:start] + func + data[end + 1:]
 
           write(path, data)
-
           print("[OK] patched kernel/reboot.c / reboot")
 
           # ============================================================
@@ -464,33 +408,39 @@ jobs:
           print("\n========== Manual Hook Verification ==========")
 
           checks = [
-              ("fs/open.c",
-               marker if False else
-               "long do_faccessat(int dfd, const char __user *filename, int mode)",
-               "ksu_handle_faccessat(&dfd"),
-
-              ("fs/exec.c",
-               "static int do_execveat_common(int fd, struct filename *filename,",
-               "ksu_handle_execveat("),
-
-              ("fs/read_write.c",
-               "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)",
-               "ksu_handle_sys_read(fd"),
-
-              ("fs/stat.c",
-               "int vfs_statx(int dfd, const char __user *filename, int flags,",
-               "ksu_handle_stat(&dfd"),
-
-              ("kernel/reboot.c",
-               "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,",
-               "ksu_handle_sys_reboot("),
+              (
+                  "fs/open.c",
+                  "long do_faccessat(int dfd, const char __user *filename, int mode)",
+                  "ksu_handle_faccessat(&dfd"
+              ),
+              (
+                  "fs/exec.c",
+                  "static int do_execveat_common(int fd, struct filename *filename,",
+                  "ksu_handle_execveat("
+              ),
+              (
+                  "fs/read_write.c",
+                  "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)",
+                  "ksu_handle_sys_read(fd"
+              ),
+              (
+                  "fs/stat.c",
+                  "int vfs_statx(int dfd, const char __user *filename, int flags,",
+                  "ksu_handle_stat(&dfd"
+              ),
+              (
+                  "kernel/reboot.c",
+                  "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,",
+                  "ksu_handle_sys_reboot("
+              ),
           ]
 
           for file, func_marker, hook_symbol in checks:
-
               txt = read(file)
 
-              start, brace, end = function_range(txt, func_marker)
+              start, brace, end = function_range(
+                  txt, func_marker
+              )
 
               func = txt[start:end + 1]
 
@@ -500,33 +450,35 @@ jobs:
                   )
 
               print(
-                  f"[OK] {file}: hook is inside target function"
+                  f"[OK] {file}: hook inside target function"
               )
 
-          print("\n[OK] all manual hooks installed in correct functions")
+          print(
+              "\n[OK] all manual hooks installed in correct functions"
+          )
           PY
 
       - name: Show patched function excerpts
         run: |
           echo "========== do_faccessat =========="
-          grep -n -A30 -B5 \
-            "long do_faccessat" fs/open.c | head -60 || true
+          grep -n -A35 -B5 \
+            "long do_faccessat" fs/open.c | head -70 || true
 
           echo "========== do_execveat_common =========="
           grep -n -A35 -B5 \
             "static int do_execveat_common" fs/exec.c | head -70 || true
 
           echo "========== read syscall =========="
-          grep -n -A30 -B5 \
-            "SYSCALL_DEFINE3(read" fs/read_write.c | head -60 || true
+          grep -n -A25 -B5 \
+            "SYSCALL_DEFINE3(read" fs/read_write.c | head -55 || true
 
           echo "========== vfs_statx =========="
-          grep -n -A30 -B5 \
-            "int vfs_statx" fs/stat.c | head -60 || true
+          grep -n -A35 -B5 \
+            "int vfs_statx" fs/stat.c | head -70 || true
 
           echo "========== reboot =========="
-          grep -n -A40 -B5 \
-            "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -80 || true
+          grep -n -A45 -B5 \
+            "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -90 || true
 
       - name: Prepare toolchain
         run: |
