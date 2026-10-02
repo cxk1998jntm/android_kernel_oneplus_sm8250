@@ -108,7 +108,7 @@ jobs:
           start, brace, end = function_range(data, marker)
           func = data[start:end + 1]
 
-          if "ksu_handle_faccessat(&dfd" not in func:
+          if "ksu_handle_faccessat" not in func:
               targets = [
                   "\tunsigned int lookup_flags = LOOKUP_FOLLOW;",
                   "    unsigned int lookup_flags = LOOKUP_FOLLOW;",
@@ -181,7 +181,7 @@ jobs:
           start, brace, end = function_range(data, marker)
           func = data[start:end + 1]
 
-          if "ksu_handle_execveat(" not in func:
+          if "ksu_handle_execveat" not in func:
               hook = """
           #ifdef CONFIG_KSU
               if (unlikely(ksu_execveat_hook))
@@ -241,8 +241,7 @@ jobs:
           start, brace, end = function_range(data, marker)
           func = data[start:end + 1]
 
-          if "ksu_handle_sys_read(fd" not in func:
-
+          if "ksu_handle_sys_read" not in func:
               targets = [
                   "\treturn ksys_read(fd, buf, count);",
                   "    return ksys_read(fd, buf, count);",
@@ -306,7 +305,7 @@ jobs:
           start, brace, end = function_range(data, marker)
           func = data[start:end + 1]
 
-          if "ksu_handle_stat(&dfd" not in func:
+          if "ksu_handle_stat" not in func:
               targets = [
                   "\tunsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
                   "    unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
@@ -369,7 +368,7 @@ jobs:
           start, brace, end = function_range(data, marker)
           func = data[start:end + 1]
 
-          if "ksu_handle_sys_reboot(" not in func:
+          if "ksu_handle_sys_reboot" not in func:
               targets = [
                   "\tif (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
                   "    if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
@@ -411,27 +410,27 @@ jobs:
               (
                   "fs/open.c",
                   "long do_faccessat(int dfd, const char __user *filename, int mode)",
-                  "ksu_handle_faccessat(&dfd"
+                  "ksu_handle_faccessat"
               ),
               (
                   "fs/exec.c",
                   "static int do_execveat_common(int fd, struct filename *filename,",
-                  "ksu_handle_execveat("
+                  "ksu_handle_execveat"
               ),
               (
                   "fs/read_write.c",
                   "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)",
-                  "ksu_handle_sys_read(fd"
+                  "ksu_handle_sys_read"
               ),
               (
                   "fs/stat.c",
                   "int vfs_statx(int dfd, const char __user *filename, int flags,",
-                  "ksu_handle_stat(&dfd"
+                  "ksu_handle_stat"
               ),
               (
                   "kernel/reboot.c",
                   "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,",
-                  "ksu_handle_sys_reboot("
+                  "ksu_handle_sys_reboot"
               ),
           ]
 
@@ -445,12 +444,16 @@ jobs:
               func = txt[start:end + 1]
 
               if hook_symbol not in func:
+                  print("\n===== VERIFY FAILURE =====")
+                  print(f"FILE: {file}")
+                  print(func[:2000])
+
                   raise SystemExit(
                       f"[FAIL] {hook_symbol} not inside target function in {file}"
                   )
 
               print(
-                  f"[OK] {file}: hook inside target function"
+                  f"[OK] {file}: {hook_symbol} inside target function"
               )
 
           print(
