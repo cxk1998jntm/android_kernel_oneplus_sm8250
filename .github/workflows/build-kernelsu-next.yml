@@ -1,4 +1,4 @@
-name: Build KernelSU-Next Kernel
+name: Build KernelSU-Next Legacy Kernel
 
 on:
   workflow_dispatch:
@@ -30,15 +30,17 @@ jobs:
             clang
 
           echo "Checking toolchain..."
-          ls -la clang/clang-r383902b/bin | head -40
           test -x clang/clang-r383902b/bin/clang
           test -x clang/clang-r383902b/bin/ld.lld
 
-      - name: Integrate KernelSU-Next
+          clang/clang-r383902b/bin/clang --version
+          clang/clang-r383902b/bin/ld.lld --version
+
+      - name: Integrate KernelSU-Next legacy
         run: |
           curl -LSs \
-            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh \
-            | bash
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            | bash -s legacy
 
       - name: Prepare toolchain
         run: |
@@ -46,9 +48,6 @@ jobs:
 
           echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> "$GITHUB_ENV"
           echo "$TOOLCHAIN_BIN" >> "$GITHUB_PATH"
-
-          "$TOOLCHAIN_BIN/clang" --version
-          "$TOOLCHAIN_BIN/ld.lld" --version
 
       - name: Prepare config
         run: |
@@ -71,6 +70,7 @@ jobs:
           cat arch/arm64/configs/vendor/oplus.config >> out/.config
 
           echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> out/.config
 
           make O=out \
             ARCH=arm64 \
@@ -119,7 +119,7 @@ jobs:
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus8T-KernelSU-Next-kernel
+          name: OnePlus8T-KernelSU-Next-Legacy
           path: |
             out/arch/arm64/boot/Image
             out/.config
