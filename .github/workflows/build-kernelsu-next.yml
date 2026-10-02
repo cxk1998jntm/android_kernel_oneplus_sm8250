@@ -22,25 +22,49 @@ jobs:
             libelf-dev libssl-dev libncurses-dev \
             python3 unzip wget zip zstd
 
-      - name: Clone Android clang
+      - name: Download Android 11 clang
         run: |
           git clone --depth=1 \
+            --branch llvm-r399163b \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             clang
 
+          echo "Checking toolchain..."
+          ls -la clang/clang-r383902b/bin | head -40
+          test -x clang/clang-r383902b/bin/clang
+          test -x clang/clang-r383902b/bin/ld.lld
+
       - name: Integrate KernelSU-Next
         run: |
-          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh | bash
+          curl -LSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh \
+            | bash
+
+      - name: Prepare toolchain
+        run: |
+          TOOLCHAIN_BIN="$GITHUB_WORKSPACE/clang/clang-r383902b/bin"
+
+          echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> "$GITHUB_ENV"
+          echo "$TOOLCHAIN_BIN" >> "$GITHUB_PATH"
+
+          "$TOOLCHAIN_BIN/clang" --version
+          "$TOOLCHAIN_BIN/ld.lld" --version
 
       - name: Prepare config
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH="$GITHUB_WORKSPACE/clang/clang-r530567/bin:$PATH"
+          export PATH="$TOOLCHAIN_BIN:$PATH"
 
           make O=out \
             ARCH=arm64 \
-            LLVM=1 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
             LLVM_IAS=1 \
             vendor/kona-perf_defconfig
 
@@ -50,26 +74,47 @@ jobs:
 
           make O=out \
             ARCH=arm64 \
-            LLVM=1 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
             LLVM_IAS=1 \
             olddefconfig
+
+          echo "KernelSU config:"
+          grep CONFIG_KSU out/.config || true
 
       - name: Build kernel
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH="$GITHUB_WORKSPACE/clang/clang-r530567/bin:$PATH"
+          export PATH="$TOOLCHAIN_BIN:$PATH"
 
           make -j$(nproc) \
             O=out \
             ARCH=arm64 \
-            LLVM=1 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
             LLVM_IAS=1
 
       - name: Show outputs
         run: |
+          echo "Boot output directory:"
           ls -lh out/arch/arm64/boot/ || true
+
+          echo "Kernel image:"
           file out/arch/arm64/boot/Image || true
+
+          echo "KernelSU config:"
+          grep CONFIG_KSU out/.config || true
 
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
