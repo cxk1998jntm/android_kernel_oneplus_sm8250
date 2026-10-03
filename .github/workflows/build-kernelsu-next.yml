@@ -1,4 +1,4 @@
-name: Build KernelSU-Next Legacy Manual Hook Kernel
+name: Build KernelSU-Next V2 Exact crDroid Kernel
 
 on:
   workflow_dispatch:
@@ -12,7 +12,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: "16.0"
-          fetch-depth: 1
+          fetch-depth: 0
+
+      - name: Checkout exact crDroid kernel commit
+        run: |
+          echo "========== Current branch HEAD =========="
+          git rev-parse HEAD
+
+          echo "========== Checkout ROM kernel commit =========="
+          git checkout d5040872497a
+
+          echo "========== Selected kernel commit =========="
+          git rev-parse HEAD
+          git rev-parse --short=12 HEAD
+          git status --short
+
+          CURRENT_SHORT="$(git rev-parse --short=12 HEAD)"
+
+          if [ "$CURRENT_SHORT" != "d5040872497a" ]; then
+            echo "[FAIL] Wrong kernel commit: $CURRENT_SHORT"
+            exit 1
+          fi
+
+          echo "[OK] exact ROM kernel commit selected"
 
       - name: Install dependencies
         run: |
@@ -22,18 +44,35 @@ jobs:
             libelf-dev libssl-dev libncurses-dev \
             python3 unzip wget zip zstd
 
-      - name: Download Android 11 clang
+      - name: Download Android clang r563880c
         run: |
           git clone --depth=1 \
-            --branch llvm-r399163b \
+            --branch android-16.0.0_r4 \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             clang
 
-          test -x clang/clang-r383902b/bin/clang
-          test -x clang/clang-r383902b/bin/ld.lld
+          test -x clang/clang-r563880c/bin/clang
+          test -x clang/clang-r563880c/bin/ld.lld
 
-          clang/clang-r383902b/bin/clang --version
-          clang/clang-r383902b/bin/ld.lld --version
+          echo "========== Clang =========="
+          clang/clang-r563880c/bin/clang --version
+
+          echo "========== LLD =========="
+          clang/clang-r563880c/bin/ld.lld --version
+
+          CLANG_VERSION="$(
+            clang/clang-r563880c/bin/clang --version |
+            head -n 1
+          )"
+
+          echo "$CLANG_VERSION"
+
+          if ! echo "$CLANG_VERSION" | grep -q "21.0.0"; then
+            echo "[FAIL] Expected clang 21.0.0"
+            exit 1
+          fi
+
+          echo "[OK] clang-r563880c / clang 21 detected"
 
       - name: Integrate KernelSU-Next legacy
         run: |
@@ -54,12 +93,18 @@ jobs:
 
           def function_range(data, marker):
               start = data.find(marker)
+
               if start == -1:
-                  raise SystemExit(f"[FAIL] function marker not found: {marker}")
+                  raise SystemExit(
+                      f"[FAIL] function marker not found: {marker}"
+                  )
 
               brace = data.find("{", start)
+
               if brace == -1:
-                  raise SystemExit(f"[FAIL] opening brace not found: {marker}")
+                  raise SystemExit(
+                      f"[FAIL] opening brace not found: {marker}"
+                  )
 
               depth = 0
 
@@ -68,17 +113,22 @@ jobs:
 
                   if ch == "{":
                       depth += 1
+
                   elif ch == "}":
                       depth -= 1
 
                       if depth == 0:
                           return start, brace, i
 
-              raise SystemExit(f"[FAIL] closing brace not found: {marker}")
+              raise SystemExit(
+                  f"[FAIL] closing brace not found: {marker}"
+              )
+
 
           # ============================================================
           # fs/open.c : do_faccessat
           # ============================================================
+
           path = "fs/open.c"
           data = read(path)
 
@@ -88,7 +138,9 @@ jobs:
           )
 
           if marker not in data:
-              raise SystemExit("[FAIL] do_faccessat signature not found")
+              raise SystemExit(
+                  "[FAIL] do_faccessat signature not found"
+              )
 
           if "extern int ksu_handle_faccessat" not in data:
               pos = data.find(marker)
@@ -109,6 +161,7 @@ jobs:
           func = data[start:end + 1]
 
           if "ksu_handle_faccessat" not in func:
+
               targets = [
                   "\tunsigned int lookup_flags = LOOKUP_FOLLOW;",
                   "    unsigned int lookup_flags = LOOKUP_FOLLOW;",
@@ -120,7 +173,9 @@ jobs:
               )
 
               if target is None:
+                  print("\n===== do_faccessat =====")
                   print(func[:1600])
+
                   raise SystemExit(
                       "[FAIL] do_faccessat lookup_flags not found"
                   )
@@ -132,14 +187,24 @@ jobs:
           #endif"""
 
               func = func.replace(target, hook, 1)
-              data = data[:start] + func + data[end + 1:]
+
+              data = (
+                  data[:start]
+                  + func
+                  + data[end + 1:]
+              )
 
           write(path, data)
-          print("[OK] patched fs/open.c / do_faccessat")
+
+          print(
+              "[OK] patched fs/open.c / do_faccessat"
+          )
+
 
           # ============================================================
           # fs/exec.c : do_execveat_common
           # ============================================================
+
           path = "fs/exec.c"
           data = read(path)
 
@@ -154,6 +219,7 @@ jobs:
               )
 
           if "extern int ksu_handle_execveat(" not in data:
+
               pos = data.find(marker)
 
               declaration = """#ifdef CONFIG_KSU
@@ -182,6 +248,7 @@ jobs:
           func = data[start:end + 1]
 
           if "ksu_handle_execveat" not in func:
+
               hook = """
           #ifdef CONFIG_KSU
               if (unlikely(ksu_execveat_hook))
@@ -201,14 +268,23 @@ jobs:
                   + func[local_brace + 1:]
               )
 
-              data = data[:start] + func + data[end + 1:]
+              data = (
+                  data[:start]
+                  + func
+                  + data[end + 1:]
+              )
 
           write(path, data)
-          print("[OK] patched fs/exec.c / do_execveat_common")
+
+          print(
+              "[OK] patched fs/exec.c / do_execveat_common"
+          )
+
 
           # ============================================================
           # fs/read_write.c : SYSCALL_DEFINE3(read)
           # ============================================================
+
           path = "fs/read_write.c"
           data = read(path)
 
@@ -222,7 +298,12 @@ jobs:
                   "[FAIL] SYSCALL_DEFINE3(read) not found"
               )
 
-          if "extern __attribute__((cold)) int ksu_handle_sys_read" not in data:
+          if (
+              "extern __attribute__((cold)) "
+              "int ksu_handle_sys_read"
+              not in data
+          ):
+
               pos = data.find(marker)
 
               declaration = """#ifdef CONFIG_KSU
@@ -242,6 +323,7 @@ jobs:
           func = data[start:end + 1]
 
           if "ksu_handle_sys_read" not in func:
+
               targets = [
                   "\treturn ksys_read(fd, buf, count);",
                   "    return ksys_read(fd, buf, count);",
@@ -253,28 +335,42 @@ jobs:
               )
 
               if target is None:
-                  print("\n===== SYSCALL_DEFINE3(read) =====")
+                  print(
+                      "\n===== SYSCALL_DEFINE3(read) ====="
+                  )
                   print(func[:1200])
+
                   raise SystemExit(
                       "[FAIL] return ksys_read line not found"
                   )
 
               hook = """#ifdef CONFIG_KSU
               if (unlikely(ksu_vfs_read_hook))
-                  ksu_handle_sys_read(fd, &buf, &count);
+                  ksu_handle_sys_read(
+                      fd, &buf, &count);
           #endif
 
           """ + target
 
               func = func.replace(target, hook, 1)
-              data = data[:start] + func + data[end + 1:]
+
+              data = (
+                  data[:start]
+                  + func
+                  + data[end + 1:]
+              )
 
           write(path, data)
-          print("[OK] patched fs/read_write.c / read")
+
+          print(
+              "[OK] patched fs/read_write.c / read"
+          )
+
 
           # ============================================================
           # fs/stat.c : vfs_statx
           # ============================================================
+
           path = "fs/stat.c"
           data = read(path)
 
@@ -289,6 +385,7 @@ jobs:
               )
 
           if "extern int ksu_handle_stat(" not in data:
+
               pos = data.find(marker)
 
               declaration = """#ifdef CONFIG_KSU
@@ -306,9 +403,13 @@ jobs:
           func = data[start:end + 1]
 
           if "ksu_handle_stat" not in func:
+
               targets = [
-                  "\tunsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
-                  "    unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
+                  "\tunsigned int lookup_flags = "
+                  "LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
+
+                  "    unsigned int lookup_flags = "
+                  "LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;",
               ]
 
               target = next(
@@ -319,24 +420,36 @@ jobs:
               if target is None:
                   print("\n===== vfs_statx =====")
                   print(func[:1800])
+
                   raise SystemExit(
                       "[FAIL] vfs_statx lookup_flags not found"
                   )
 
               hook = target + """
           #ifdef CONFIG_KSU
-              ksu_handle_stat(&dfd, &filename, &flags);
+              ksu_handle_stat(
+                  &dfd, &filename, &flags);
           #endif"""
 
               func = func.replace(target, hook, 1)
-              data = data[:start] + func + data[end + 1:]
+
+              data = (
+                  data[:start]
+                  + func
+                  + data[end + 1:]
+              )
 
           write(path, data)
-          print("[OK] patched fs/stat.c / vfs_statx")
+
+          print(
+              "[OK] patched fs/stat.c / vfs_statx"
+          )
+
 
           # ============================================================
           # kernel/reboot.c
           # ============================================================
+
           path = "kernel/reboot.c"
           data = read(path)
 
@@ -351,6 +464,7 @@ jobs:
               )
 
           if "extern int ksu_handle_sys_reboot(" not in data:
+
               pos = data.find(marker)
 
               declaration = """#ifdef CONFIG_KSU
@@ -369,10 +483,16 @@ jobs:
           func = data[start:end + 1]
 
           if "ksu_handle_sys_reboot" not in func:
+
               targets = [
-                  "\tif (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
-                  "    if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
-                  "if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))",
+                  "\tif (!ns_capable("
+                  "pid_ns->user_ns, CAP_SYS_BOOT))",
+
+                  "    if (!ns_capable("
+                  "pid_ns->user_ns, CAP_SYS_BOOT))",
+
+                  "if (!ns_capable("
+                  "pid_ns->user_ns, CAP_SYS_BOOT))",
               ]
 
               target = next(
@@ -383,6 +503,7 @@ jobs:
               if target is None:
                   print("\n===== reboot syscall =====")
                   print(func[:1800])
+
                   raise SystemExit(
                       "[FAIL] reboot capability check not found"
                   )
@@ -396,68 +517,101 @@ jobs:
           """ + target
 
               func = func.replace(target, hook, 1)
-              data = data[:start] + func + data[end + 1:]
+
+              data = (
+                  data[:start]
+                  + func
+                  + data[end + 1:]
+              )
 
           write(path, data)
-          print("[OK] patched kernel/reboot.c / reboot")
+
+          print(
+              "[OK] patched kernel/reboot.c / reboot"
+          )
+
 
           # ============================================================
           # Verification
           # ============================================================
-          print("\n========== Manual Hook Verification ==========")
+
+          print(
+              "\n========== Manual Hook Verification =========="
+          )
 
           checks = [
               (
                   "fs/open.c",
-                  "long do_faccessat(int dfd, const char __user *filename, int mode)",
+                  "long do_faccessat("
+                  "int dfd, const char __user *filename, int mode)",
                   "ksu_handle_faccessat"
               ),
               (
                   "fs/exec.c",
-                  "static int do_execveat_common(int fd, struct filename *filename,",
+                  "static int do_execveat_common("
+                  "int fd, struct filename *filename,",
                   "ksu_handle_execveat"
               ),
               (
                   "fs/read_write.c",
-                  "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)",
+                  "SYSCALL_DEFINE3("
+                  "read, unsigned int, fd, "
+                  "char __user *, buf, size_t, count)",
                   "ksu_handle_sys_read"
               ),
               (
                   "fs/stat.c",
-                  "int vfs_statx(int dfd, const char __user *filename, int flags,",
+                  "int vfs_statx("
+                  "int dfd, const char __user *filename, int flags,",
                   "ksu_handle_stat"
               ),
               (
                   "kernel/reboot.c",
-                  "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,",
+                  "SYSCALL_DEFINE4("
+                  "reboot, int, magic1, int, magic2, "
+                  "unsigned int, cmd,",
                   "ksu_handle_sys_reboot"
               ),
           ]
 
           for file, func_marker, hook_symbol in checks:
+
               txt = read(file)
 
               start, brace, end = function_range(
-                  txt, func_marker
+                  txt,
+                  func_marker
               )
 
               func = txt[start:end + 1]
 
               if hook_symbol not in func:
-                  print("\n===== VERIFY FAILURE =====")
-                  print(f"FILE: {file}")
-                  print(func[:2000])
+
+                  print(
+                      "\n===== VERIFY FAILURE ====="
+                  )
+
+                  print(
+                      f"FILE: {file}"
+                  )
+
+                  print(
+                      func[:2000]
+                  )
 
                   raise SystemExit(
-                      f"[FAIL] {hook_symbol} not inside target function in {file}"
+                      f"[FAIL] {hook_symbol} "
+                      f"not inside target function in {file}"
                   )
 
               print(
-                  f"[OK] {file}: {hook_symbol} inside target function"
+                  f"[OK] {file}: "
+                  f"{hook_symbol} inside target function"
               )
 
           print(
-              "\n[OK] all manual hooks installed in correct functions"
+              "\n[OK] all manual hooks installed "
+              "in correct functions"
           )
           PY
 
@@ -485,7 +639,7 @@ jobs:
 
       - name: Prepare toolchain
         run: |
-          TOOLCHAIN_BIN="$GITHUB_WORKSPACE/clang/clang-r383902b/bin"
+          TOOLCHAIN_BIN="$GITHUB_WORKSPACE/clang/clang-r563880c/bin"
 
           echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> "$GITHUB_ENV"
           echo "$TOOLCHAIN_BIN" >> "$GITHUB_PATH"
@@ -495,6 +649,10 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$TOOLCHAIN_BIN:$PATH"
+
+          echo "========== Toolchain used for kernel =========="
+          clang --version
+          ld.lld --version
 
           make O=out \
             ARCH=arm64 \
@@ -508,11 +666,18 @@ jobs:
             LLVM_IAS=1 \
             vendor/kona-perf_defconfig
 
-          cat arch/arm64/configs/vendor/oplus.config >> out/.config
+          cat \
+            arch/arm64/configs/vendor/oplus.config \
+            >> out/.config
 
-          echo "CONFIG_KSU=y" >> out/.config
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> out/.config
-          echo "# CONFIG_KSU_KPROBES_HOOK is not set" >> out/.config
+          echo "CONFIG_KSU=y" \
+            >> out/.config
+
+          echo "CONFIG_KSU_MANUAL_HOOK=y" \
+            >> out/.config
+
+          echo "# CONFIG_KSU_KPROBES_HOOK is not set" \
+            >> out/.config
 
           make O=out \
             ARCH=arm64 \
@@ -528,6 +693,11 @@ jobs:
 
           echo "========== KernelSU config =========="
           grep CONFIG_KSU out/.config || true
+
+          echo "========== Compiler config =========="
+          grep -E \
+            "CONFIG_(CC_VERSION_TEXT|CLANG_VERSION|LLD_VERSION)" \
+            out/.config || true
 
       - name: Build kernel
         run: |
@@ -547,21 +717,36 @@ jobs:
             STRIP=llvm-strip \
             LLVM_IAS=1
 
-      - name: Show outputs
+      - name: Verify final build
         run: |
+          echo "========== Kernel source commit =========="
+          git rev-parse HEAD
+          git rev-parse --short=12 HEAD
+
+          echo "========== Compiler =========="
+          "$TOOLCHAIN_BIN/clang" --version
+
           echo "========== Boot output directory =========="
           ls -lh out/arch/arm64/boot/ || true
 
           echo "========== Kernel Image =========="
           file out/arch/arm64/boot/Image || true
+          ls -lh out/arch/arm64/boot/Image
 
           echo "========== KernelSU config =========="
           grep CONFIG_KSU out/.config || true
 
+          echo "========== Compiler config =========="
+          grep -E \
+            "CONFIG_(CC_VERSION_TEXT|CLANG_VERSION|LLD_VERSION)" \
+            out/.config || true
+
+          test -f out/arch/arm64/boot/Image
+
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus8T-KernelSU-Next-Legacy-ManualHook
+          name: OnePlus8T-KSU-V2-d504087-Clang21
           path: |
             out/arch/arm64/boot/Image
             out/.config
